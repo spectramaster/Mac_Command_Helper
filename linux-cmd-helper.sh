@@ -83,7 +83,9 @@ confirm() {
 }
 
 press_any_key() {
-  [ "$LCMD_NONINTERACTIVE" = "1" ] && return 0
+  if [ "${CMD_HELPER_TEST_MODE:-0}" = "1" ] || [ "${LCMD_NONINTERACTIVE:-0}" = "1" ]; then
+    return 0
+  fi
   echo -e "\n${COLOR_DIM}按任意键继续...${COLOR_RESET}"; read -n 1 -s
 }
 
@@ -103,7 +105,11 @@ log_to_history() {
 
 record_metric() {
   local id="$1"; local status="$2"; local duration="$3"
-  if ! command -v jq >/dev/null 2>&1; then echo "$(date +%s)|$id|$status|$duration" >> "$CONFIG_DIR/metrics.log"; rotate_file "$CONFIG_DIR/metrics.log" 5000; return; fi
+  if [ "${CMD_HELPER_DISABLE_JQ:-0}" = "1" ] || ! command -v jq >/dev/null 2>&1; then
+    echo "$(date +%s)|$id|$status|$duration" >> "$CONFIG_DIR/metrics.log"
+    rotate_file "$CONFIG_DIR/metrics.log" 5000
+    return
+  fi
   [ -f "$METRICS_FILE" ] || echo '{"total":0,"commands":{}}' > "$METRICS_FILE"
   tmp=$(mktemp)
   jq --arg id "$id" --arg s "$status" --arg d "$duration" '
@@ -118,7 +124,10 @@ record_metric() {
 init_favorites() { [ -f "$FAVORITES_FILE" ] || echo "[]" > "$FAVORITES_FILE"; }
 add_to_favorites() {
   local id="$1"; init_favorites
-  if ! command -v jq >/dev/null 2>&1; then show_error "收藏功能需要 jq"; return 1; fi
+  if [ "${CMD_HELPER_DISABLE_JQ:-0}" = "1" ] || ! command -v jq >/dev/null 2>&1; then
+    show_error "收藏功能需要 jq"
+    return 1
+  fi
   if grep -q "\"$id\"" "$FAVORITES_FILE" 2>/dev/null; then show_warning "已在收藏夹"; return 0; fi
   tmp=$(mktemp); jq ". += [\"$id\"]" "$FAVORITES_FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$FAVORITES_FILE"; show_success "已收藏";
 }
@@ -169,32 +178,55 @@ execute_command() {
 
   echo ""; draw_double_line; echo -e "${COLOR_INFO}${ICON_ROCKET} 正在执行...${COLOR_RESET}\n"; draw_double_line; echo ""
   local start_time=$(date +%s)
+  local err_file=""
+  local exit_code=0
 
-  local err_file=$(mktemp)
-  if [ "$needs_sudo" = "yes" ]; then
-    bash -c "sudo bash -c '$command'" 2>"$err_file"
+  if [ "${CMD_HELPER_TEST_MODE:-0}" = "1" ]; then
+    [ -n "${CMD_HELPER_TEST_LOG:-}" ] && printf "%s|%s|%s\n" "$id" "$needs_sudo" "$command" >> "$CMD_HELPER_TEST_LOG"
+    if [[ ",${CMD_HELPER_TEST_FAIL_IDS:-}," == *",$id,"* ]]; then
+      exit_code=${CMD_HELPER_TEST_FAIL_CODE:-1}
+    else
+      exit_code=0
+    fi
   else
-    bash -c "$command" 2>"$err_file"
+    err_file=$(mktemp)
+    if [ "$needs_sudo" = "yes" ]; then
+      bash -c "sudo bash -c '$command'" 2>"$err_file"
+    else
+      bash -c "$command" 2>"$err_file"
+    fi
+    exit_code=$?
   fi
-  local exit_code=$?
+
   local end_time=$(date +%s); local duration=$((end_time - start_time))
 
   if [ $exit_code -eq 0 ]; then
     show_success "命令执行成功！（耗时: ${duration}秒）"
     log_to_history "$id" "$name" "success" "$duration" "$exit_code"
     record_metric "$id" "success" "$duration"
-    [ -s "$err_file" ] && rm -f "$err_file"
+    if [ -n "$err_file" ] && [ -s "$err_file" ]; then
+      rm -f "$err_file"
+    fi
     press_any_key; return 0
   else
     show_error "命令执行失败（退出码: $exit_code）"
     log_to_history "$id" "$name" "failed" "$duration" "$exit_code"
     record_metric "$id" "failed" "$duration"
-    if [ -s "$err_file" ]; then
+    if [ -n "$err_file" ] && [ -s "$err_file" ]; then
       {
         echo ">>> $(date '+%Y-%m-%d %H:%M:%S') | $id | $name | exit: $exit_code"; echo "stderr:"; tail -n 50 "$err_file"; echo "<<<"
       } >> "$ERROR_LOG"; rotate_file "$ERROR_LOG" 5000
+    elif [ "${CMD_HELPER_TEST_MODE:-0}" = "1" ]; then
+      {
+        echo ">>> $(date '+%Y-%m-%d %H:%M:%S') | $id | $name | exit: $exit_code"
+        echo "stderr:"
+        echo "(simulated failure)"
+        echo "<<<"
+      } >> "$ERROR_LOG"; rotate_file "$ERROR_LOG" 5000
     fi
-    rm -f "$err_file" 2>/dev/null || true
+    if [ -n "$err_file" ]; then
+      rm -f "$err_file" 2>/dev/null || true
+    fi
     press_any_key; return 1
   fi
 }
@@ -270,13 +302,54 @@ cli_entry() {
         local matches=()
         for cmd_data in "${COMMANDS[@]}"; do IFS='|' read -r id cat name command _ _ desc _ _ _ _ <<< "$cmd_data"; if [[ "$name" == *"$keyword"* ]] || [[ "$desc" == *"$keyword"* ]] || [[ "$command" == *"$keyword"* ]]; then matches+=("$cmd_data"); fi; done
         [ ${#matches[@]} -eq 0 ] && echo "未找到" && exit 1
-        if [ $output_json -eq 1 ] && command -v jq >/dev/null 2>&1; then
-          printf '['; local i=0; for cmd_data in "${matches[@]}"; do IFS='|' read -r id cat name command _ _ desc _ _ _ _ <<< "$cmd_data"; printf '{"id":"%s","category":"%s","name":"%s"}' "$id" "$cat" "$name"; i=$((i+1)); [ $i -lt ${#matches[@]} ] && printf ','; done; printf ']\n' | jq '.'
+        if [ $output_json -eq 1 ] && [ "${CMD_HELPER_DISABLE_JQ:-0}" != "1" ] && command -v jq >/dev/null 2>&1; then
+          local json_output
+          json_output="$(
+            i=0
+            printf '['
+            for cmd_data in "${matches[@]}"; do
+              IFS='|' read -r id cat name command _ _ desc _ _ _ _ <<< "$cmd_data"
+              printf '{"id":"%s","category":"%s","name":"%s"}' "$id" "$cat" "$name"
+              i=$((i+1))
+              [ $i -lt ${#matches[@]} ] && printf ','
+            done
+            printf ']\n'
+          )"
+          printf '%s' "$json_output" | jq '.'
         else
           for cmd_data in "${matches[@]}"; do IFS='|' read -r id cat name _ _ _ _ _ _ _ _ <<< "$cmd_data"; printf '%-6s %-12s %s\n' "[$id]" "($cat)" "$name"; done
         fi
         [ -n "$run_id" ] && quick_execute "$run_id"
         [ $run_first -eq 1 ] && IFS='|' read -r first_id _ _ _ _ _ _ _ _ _ _ <<< "${matches[0]}" && quick_execute "$first_id"; exit 0;
+        ;;
+      combo)
+        if [ "${CMD_HELPER_DISABLE_JQ:-0}" = "1" ] || ! command -v jq >/dev/null 2>&1; then
+          echo "命令组合需要 jq，无法执行"
+          exit 1
+        fi
+        [ -z "$2" ] && echo "用法: $SCRIPT_NAME combo <index|name>" && exit 1
+        init_combos
+        local sel="$2"; shift 2
+        local cmd_ids=""
+        if [[ "$sel" =~ ^[0-9]+$ ]]; then
+          cmd_ids=$(jq -r '."预设组合"['"$((sel-1))"'].commands | join(" ")' "$COMBOS_FILE" 2>/dev/null)
+        else
+          cmd_ids=$(jq -r '."预设组合"[] | select(.name=="'"$sel"'") | .commands | join(" ")' "$COMBOS_FILE" 2>/dev/null)
+        fi
+        if [ -z "$cmd_ids" ] || [ "$cmd_ids" = "null" ]; then
+          echo "未找到命令组合: $sel"
+          exit 1
+        fi
+        for cid in $cmd_ids; do
+          for cmd_data in "${COMMANDS[@]}"; do
+            IFS='|' read -r id _ _ _ _ _ _ _ _ _ _ <<< "$cmd_data"
+            if [ "$id" = "$cid" ]; then
+              execute_command "$cmd_data" "yes"
+              break
+            fi
+          done
+        done
+        exit 0
         ;;
       help|-h|--help) show_help; exit 0;;
       version|-v|--version) echo "Linux Command Helper v$L_VERSION"; exit 0;;
@@ -592,7 +665,11 @@ show_history() {
 
 view_favorites_menu() {
   clear_screen; echo -e "${COLOR_TITLE}${BOLD}⭐ 收藏夹${COLOR_RESET}\n"; init_favorites
-  if ! command -v jq >/dev/null 2>&1; then show_error "收藏功能需要 jq"; press_any_key; return; fi
+  if [ "${CMD_HELPER_DISABLE_JQ:-0}" = "1" ] || ! command -v jq >/dev/null 2>&1; then
+    show_error "收藏功能需要 jq"
+    press_any_key
+    return
+  fi
   local favorites=$(cat "$FAVORITES_FILE")
   [ "$favorites" = "[]" ] && show_info "收藏夹为空" && press_any_key && return
   local index=1; local favorite_cmds=()
@@ -602,7 +679,11 @@ view_favorites_menu() {
 
 view_combos() {
   clear_screen; echo -e "${COLOR_TITLE}${BOLD}🎯 命令组合${COLOR_RESET}\n"; init_combos
-  if ! command -v jq >/dev/null 2>&1; then show_error "命令组合需要 jq"; press_any_key; return; fi
+  if [ "${CMD_HELPER_DISABLE_JQ:-0}" = "1" ] || ! command -v jq >/dev/null 2>&1; then
+    show_error "命令组合需要 jq"
+    press_any_key
+    return
+  fi
   echo -e "${COLOR_INFO}预设组合:${COLOR_RESET}\n"
   local idx=1
   jq -r '.预设组合[] | "\(.name)|\(.description)|\(.commands | join(","))"' "$COMBOS_FILE" | while IFS='|' read -r name desc ids; do echo -e "  ${BOLD}$idx.${COLOR_RESET} $name\n     ${COLOR_DIM}$desc${COLOR_RESET}\n     ${COLOR_DIM}命令: $ids${COLOR_RESET}\n"; idx=$((idx+1)); done
