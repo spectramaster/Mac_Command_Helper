@@ -28,6 +28,12 @@ CLI & Installer
 Packaging
 - Add Homebrew formula template and `scripts/release.sh`
 
+Linux Edition v1.0.0 (2025-10-04)
+- Add Linux server script `linux-cmd-helper.sh` (Debian/Ubuntu)
+- Add installer `install-linux.sh` and docs `README_LINUX.md`
+- 10 categories, 40+ commands for APT, services, network, storage, security, users, Docker, monitoring, backup
+- Safety-first: dry-run previews, backups, double confirmations, error logs, history with exit codes
+
 Docs
 - README badges + TOC; telemetry and theme docs
 - INDEX and CHEATSHEET adjustments
