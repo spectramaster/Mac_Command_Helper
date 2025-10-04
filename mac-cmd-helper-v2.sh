@@ -187,7 +187,9 @@ draw_info_box() {
 }
 
 clear_screen() {
-    clear
+    if [ -t 1 ]; then
+        clear
+    fi
     draw_title_box "🚀 Mac Command Helper v$VERSION"
     echo -e "${COLOR_DIM}        你的终端效率助手 - 更强大、更智能${COLOR_RESET}\n"
     draw_double_line
@@ -247,6 +249,9 @@ confirm() {
 }
 
 press_any_key() {
+    if [ "${CMD_HELPER_TEST_MODE:-0}" = "1" ] || [ "${MCMD_NONINTERACTIVE:-0}" = "1" ]; then
+        return 0
+    fi
     echo -e "\n${COLOR_DIM}按任意键继续...${COLOR_RESET}"
     read -n 1 -s
 }
@@ -742,7 +747,7 @@ check_ffmpeg() {
 # 读取配置键（需要 jq）
 read_config_key() {
     local key="$1"
-    if command -v jq >/dev/null 2>&1 && [ -f "$CONFIG_FILE" ]; then
+    if [ "${CMD_HELPER_DISABLE_JQ:-0}" != "1" ] && command -v jq >/dev/null 2>&1 && [ -f "$CONFIG_FILE" ]; then
         jq -r --arg k "$key" '.[$k] // empty' "$CONFIG_FILE" 2>/dev/null
     fi
 }
@@ -763,7 +768,7 @@ record_metric() {
     local cmd_id="$1"; local status="$2"; local duration="$3"
     telemetry_enabled || return 0
     mkdir -p "$CONFIG_DIR"
-    if command -v jq >/dev/null 2>&1; then
+    if [ "${CMD_HELPER_DISABLE_JQ:-0}" != "1" ] && command -v jq >/dev/null 2>&1; then
         [ -f "$METRICS_FILE" ] || echo '{"total":0,"commands":{}}' > "$METRICS_FILE"
         tmp=$(mktemp)
         jq --arg id "$cmd_id" --arg s "$status" --arg d "$duration" '
@@ -779,7 +784,7 @@ record_metric() {
 
 # jq 依赖（收藏与组合需要）
 check_jq() {
-    if ! command -v jq &> /dev/null; then
+    if [ "${CMD_HELPER_DISABLE_JQ:-0}" = "1" ] || ! command -v jq &> /dev/null; then
         show_warning "未检测到 jq"
         show_info "收藏夹与命令组合需要 jq。建议安装: brew install jq"
         return 1
@@ -2016,150 +2021,154 @@ execute_command() {
     echo -e "${COLOR_INFO}${ICON_ROCKET} 正在执行命令...${COLOR_RESET}\n"
     draw_double_line
     echo ""
-    
-    # 记录开始时间
+
     local start_time=$(date +%s)
-    
-    # 执行命令
-    if [[ "$command" == *"\$"* ]]; then
-        # 需要用户输入参数的命令
-        case "$command" in
-            *\$VENV_PATH*)
-                while true; do
-                    echo -ne "${COLOR_ACCENT}请输入虚拟环境路径: ${COLOR_RESET}"
-                    read -r venv_path
-                    if sanitize_path "$venv_path"; then break; else show_error "路径不合法，请重试"; fi
-                done
-                eval "command=${command//\$VENV_PATH/$venv_path}"
-                local err_file=$(mktemp)
-                eval "$command" 2>"$err_file"; local exit_code=$?
-                ;;
-            *\$VENV_NAME*)
-                while true; do
-                    echo -ne "${COLOR_ACCENT}请输入虚拟环境名称: ${COLOR_RESET}"
-                    read -r venv_name
-                    if sanitize_name "$venv_name"; then break; else show_error "名称不合法，请重试"; fi
-                done
-                eval "command=${command//\$VENV_NAME/$venv_name}"
-                local err_file=$(mktemp)
-                eval "$command" 2>"$err_file"; local exit_code=$?
-                ;;
-            *\$PORT*)
-                while true; do
-                    echo -ne "${COLOR_ACCENT}请输入端口号: ${COLOR_RESET}"
-                    read -r port
-                    if sanitize_int "$port"; then break; else show_error "端口必须是数字"; fi
-                done
-                eval "command=${command//\$PORT/$port}"
-                local err_file=$(mktemp)
-                eval "$command" 2>"$err_file"; local exit_code=$?
-                ;;
-            *\$FORMAT*)
-                while true; do
-                    echo -ne "${COLOR_ACCENT}请输入格式 (png/jpg/pdf): ${COLOR_RESET}"
-                    read -r format
-                    case "$format" in png|jpg|pdf) break;; *) show_error "格式仅支持 png/jpg/pdf";; esac
-                done
-                eval "command=${command//\$FORMAT/$format}"
-                local err_file=$(mktemp)
-                eval "$command" 2>"$err_file"; local exit_code=$?
-                show_success "截图格式已更改为 $format"
-                ;;
-            *\$PATH*)
-                while true; do
-                    echo -ne "${COLOR_ACCENT}请输入路径: ${COLOR_RESET}"
-                    read -r path
-                    if sanitize_path "$path"; then break; else show_error "路径不合法，请重试"; fi
-                done
-                eval "command=${command//\$PATH/$path}"
-                local err_file=$(mktemp)
-                eval "$command" 2>"$err_file"; local exit_code=$?
-                ;;
-            *\$SIZE*)
-                while true; do
-                    echo -ne "${COLOR_ACCENT}请输入大小 (16-128): ${COLOR_RESET}"
-                    read -r size
-                    if sanitize_int "$size" && [ "$size" -ge 16 ] && [ "$size" -le 128 ]; then break; else show_error "请输入 16-128 的数字"; fi
-                done
-                eval "command=${command//\$SIZE/$size}"
-                local err_file=$(mktemp)
-                eval "$command" 2>"$err_file"; local exit_code=$?
-                show_success "Dock 大小已调整"
-                ;;
-            *\$APP_NAME*)
-                while true; do
-                    echo -ne "${COLOR_ACCENT}请输入应用名称: ${COLOR_RESET}"
-                    read -r app_name
-                    if sanitize_name "$app_name"; then break; else show_error "名称不合法，请重试"; fi
-                done
-                if killall -9 "$app_name" 2>/dev/null; then
-                    show_success "已强制退出 $app_name"
-                else
-                    show_error "未找到应用: $app_name"
-                fi
-                local exit_code=$?
-                ;;
-            *\$NAME*|*\$EMAIL*)
-                while true; do
-                    echo -ne "${COLOR_ACCENT}请输入用户名: ${COLOR_RESET}"
-                    read -r git_name
-                    if sanitize_name "$git_name"; then break; else show_error "用户名不合法，请重试"; fi
-                done
-                while true; do
-                    echo -ne "${COLOR_ACCENT}请输入邮箱: ${COLOR_RESET}"
-                    read -r git_email
-                    if sanitize_email "$git_email"; then break; else show_error "邮箱格式不正确"; fi
-                done
-                git config --global user.name "$git_name"
-                git config --global user.email "$git_email"
-                show_success "Git 配置完成"
-                local exit_code=0
-                ;;
-            *"FILE"*)
-                while true; do
-                    echo -ne "${COLOR_ACCENT}请输入文件路径: ${COLOR_RESET}"
-                    read -r file_path
-                    if sanitize_path "$file_path"; then break; else show_error "路径不合法，请重试"; fi
-                done
-                if command -v srm &> /dev/null; then
-                    eval "command=${command//\$FILE/$file_path}"
-                    local err_file=$(mktemp)
-                    eval "$command" 2>"$err_file"; exit_code=$?
-                else
-                    # APFS 上 rm -P 不保证不可恢复，使用普通删除并提示
-                    local err_file=$(mktemp)
-                    rm -f "$file_path" 2>"$err_file"; exit_code=$?
-                fi
-                if [ $exit_code -eq 0 ]; then
-                    if command -v srm &> /dev/null; then
-                        show_success "文件已安全删除"
-                    else
-                        show_warning "文件已删除（APFS 上无法保证不可恢复）"
-                    fi
-                else
-                    show_error "删除失败"
-                fi
-                ;;
-            *)
-                local err_file=$(mktemp)
-                eval "$command" 2>"$err_file"
-                local exit_code=$?
-                ;;
-        esac
-    else
-        # 直接执行的命令
-        local err_file=$(mktemp)
-        if [ "$needs_sudo" == "yes" ]; then
-            sudo bash -c "$command" 2>"$err_file"
+    local err_file=""
+    local exit_code=0
+
+    if [ "${CMD_HELPER_TEST_MODE:-0}" = "1" ]; then
+        [ -n "${CMD_HELPER_TEST_LOG:-}" ] && printf "%s|%s|%s\n" "$id" "$needs_sudo" "$command" >> "$CMD_HELPER_TEST_LOG"
+        if [[ ",${CMD_HELPER_TEST_FAIL_IDS:-}," == *",$id,"* ]]; then
+            exit_code=${CMD_HELPER_TEST_FAIL_CODE:-1}
         else
-            eval "$command" 2>"$err_file"
+            exit_code=0
         fi
-        local exit_code=$?
+    else
+        err_file=$(mktemp)
+        if [[ "$command" == *"\$"* ]]; then
+            case "$command" in
+                *\$VENV_PATH*)
+                    while true; do
+                        echo -ne "${COLOR_ACCENT}请输入虚拟环境路径: ${COLOR_RESET}"
+                        read -r venv_path
+                        if sanitize_path "$venv_path"; then break; else show_error "路径不合法，请重试"; fi
+                    done
+                    command=${command//\$VENV_PATH/$venv_path}
+                    eval "$command" 2>"$err_file"
+                    exit_code=$?
+                    ;;
+                *\$VENV_NAME*)
+                    while true; do
+                        echo -ne "${COLOR_ACCENT}请输入虚拟环境名称: ${COLOR_RESET}"
+                        read -r venv_name
+                        if sanitize_name "$venv_name"; then break; else show_error "名称不合法，请重试"; fi
+                    done
+                    command=${command//\$VENV_NAME/$venv_name}
+                    eval "$command" 2>"$err_file"
+                    exit_code=$?
+                    ;;
+                *\$PORT*)
+                    while true; do
+                        echo -ne "${COLOR_ACCENT}请输入端口号: ${COLOR_RESET}"
+                        read -r port
+                        if sanitize_int "$port"; then break; else show_error "端口必须是数字"; fi
+                    done
+                    command=${command//\$PORT/$port}
+                    eval "$command" 2>"$err_file"
+                    exit_code=$?
+                    ;;
+                *\$FORMAT*)
+                    while true; do
+                        echo -ne "${COLOR_ACCENT}请输入格式 (png/jpg/pdf): ${COLOR_RESET}"
+                        read -r format
+                        case "$format" in png|jpg|pdf) break;; *) show_error "格式仅支持 png/jpg/pdf";; esac
+                    done
+                    command=${command//\$FORMAT/$format}
+                    eval "$command" 2>"$err_file"
+                    exit_code=$?
+                    show_success "截图格式已更改为 $format"
+                    ;;
+                *\$PATH*)
+                    while true; do
+                        echo -ne "${COLOR_ACCENT}请输入路径: ${COLOR_RESET}"
+                        read -r path
+                        if sanitize_path "$path"; then break; else show_error "路径不合法，请重试"; fi
+                    done
+                    command=${command//\$PATH/$path}
+                    eval "$command" 2>"$err_file"
+                    exit_code=$?
+                    ;;
+                *\$SIZE*)
+                    while true; do
+                        echo -ne "${COLOR_ACCENT}请输入大小 (16-128): ${COLOR_RESET}"
+                        read -r size
+                        if sanitize_int "$size" && [ "$size" -ge 16 ] && [ "$size" -le 128 ]; then break; else show_error "请输入 16-128 的数字"; fi
+                    done
+                    command=${command//\$SIZE/$size}
+                    eval "$command" 2>"$err_file"
+                    exit_code=$?
+                    show_success "Dock 大小已调整"
+                    ;;
+                *\$APP_NAME*)
+                    while true; do
+                        echo -ne "${COLOR_ACCENT}请输入应用名称: ${COLOR_RESET}"
+                        read -r app_name
+                        if sanitize_name "$app_name"; then break; else show_error "名称不合法，请重试"; fi
+                    done
+                    killall -9 "$app_name" 2>"$err_file"
+                    exit_code=$?
+                    if [ $exit_code -eq 0 ]; then
+                        show_success "已强制退出 $app_name"
+                    else
+                        show_error "未找到应用: $app_name"
+                    fi
+                    ;;
+                *\$NAME*|*\$EMAIL*)
+                    while true; do
+                        echo -ne "${COLOR_ACCENT}请输入用户名: ${COLOR_RESET}"
+                        read -r git_name
+                        if sanitize_name "$git_name"; then break; else show_error "用户名不合法，请重试"; fi
+                    done
+                    while true; do
+                        echo -ne "${COLOR_ACCENT}请输入邮箱: ${COLOR_RESET}"
+                        read -r git_email
+                        if sanitize_email "$git_email"; then break; else show_error "邮箱格式不正确"; fi
+                    done
+                    git config --global user.name "$git_name" 2>"$err_file"
+                    git config --global user.email "$git_email" 2>>"$err_file"
+                    exit_code=0
+                    show_success "Git 配置完成"
+                    ;;
+                *"FILE"*)
+                    while true; do
+                        echo -ne "${COLOR_ACCENT}请输入文件路径: ${COLOR_RESET}"
+                        read -r file_path
+                        if sanitize_path "$file_path"; then break; else show_error "路径不合法，请重试"; fi
+                    done
+                    if command -v srm &> /dev/null; then
+                        command=${command//\$FILE/$file_path}
+                        eval "$command" 2>"$err_file"
+                        exit_code=$?
+                        if [ $exit_code -eq 0 ]; then
+                            show_success "文件已安全删除"
+                        else
+                            show_error "删除失败"
+                        fi
+                    else
+                        rm -f "$file_path" 2>"$err_file"
+                        exit_code=$?
+                        if [ $exit_code -eq 0 ]; then
+                            show_warning "文件已删除（APFS 上无法保证不可恢复）"
+                        else
+                            show_error "删除失败"
+                        fi
+                    fi
+                    ;;
+                *)
+                    eval "$command" 2>"$err_file"
+                    exit_code=$?
+                    ;;
+            esac
+        else
+            if [ "$needs_sudo" == "yes" ]; then
+                sudo bash -c "$command" 2>"$err_file"
+            else
+                eval "$command" 2>"$err_file"
+            fi
+            exit_code=$?
+        fi
     fi
-    
-    local exit_code=$?
-    
-    # 计算执行时间
+
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
     
@@ -2197,7 +2206,9 @@ execute_command() {
         log_to_history "$id" "$name" "success" "$duration" "$exit_code"
         record_metric "$id" "success" "$duration"
         
-        [ -f "$err_file" ] && rm -f "$err_file"
+        if [ -n "$err_file" ] && [ -f "$err_file" ]; then
+            rm -f "$err_file"
+        fi
         if [ "$skip_confirm" != "yes" ]; then
             press_any_key
         fi
@@ -2207,7 +2218,7 @@ execute_command() {
         log_to_history "$id" "$name" "failed" "$duration" "$exit_code"
         record_metric "$id" "failed" "$duration"
         # 记录错误日志摘要
-        if [ -s "$err_file" ]; then
+        if [ -n "$err_file" ] && [ -s "$err_file" ]; then
             {
                 echo ">>> $(date '+%Y-%m-%d %H:%M:%S') | $id | $name | exit: $exit_code"
                 echo "stderr:"
@@ -2215,8 +2226,18 @@ execute_command() {
                 echo "<<<"
             } >> "$ERROR_LOG"
             rotate_file "$ERROR_LOG" 5000
+        elif [ "${CMD_HELPER_TEST_MODE:-0}" = "1" ]; then
+            {
+                echo ">>> $(date '+%Y-%m-%d %H:%M:%S') | $id | $name | exit: $exit_code"
+                echo "stderr:"
+                echo "(simulated failure)"
+                echo "<<<"
+            } >> "$ERROR_LOG"
+            rotate_file "$ERROR_LOG" 5000
         fi
-        [ -f "$err_file" ] && rm -f "$err_file"
+        if [ -n "$err_file" ] && [ -f "$err_file" ]; then
+            rm -f "$err_file"
+        fi
         if [ "$skip_confirm" != "yes" ]; then
             press_any_key
         fi
@@ -2517,7 +2538,7 @@ view_combos() {
     echo -e "${COLOR_INFO}预设组合:${COLOR_RESET}\n"
     
     local index=1
-    jq -r '.预设组合[] | "\(.name)|\(.description)|\(.commands | join(","))"' "$COMBOS_FILE" 2>/dev/null | while IFS='|' read -r combo_name desc cmd_ids; do
+    jq -r '.["预设组合"][] | "\(.name)|\(.description)|\(.commands | join(","))"' "$COMBOS_FILE" 2>/dev/null | while IFS='|' read -r combo_name desc cmd_ids; do
         echo -e "  ${BOLD}$index.${COLOR_RESET} $combo_name"
         echo -e "     ${COLOR_DIM}$desc${COLOR_RESET}"
         echo -e "     ${COLOR_DIM}命令: $cmd_ids${COLOR_RESET}"
@@ -2537,7 +2558,7 @@ view_combos() {
     fi
     
     # 获取选中的组合
-    local combo_data=$(jq -r ".预设组合[$((choice-1))]" "$COMBOS_FILE" 2>/dev/null)
+    local combo_data=$(jq -r ".[\"预设组合\"][ $((choice-1)) ]" "$COMBOS_FILE" 2>/dev/null)
     
     if [ "$combo_data" == "null" ] || [ -z "$combo_data" ]; then
         show_error "无效选项"
@@ -2787,13 +2808,19 @@ show_category_menu() {
 
 quick_execute() {
     local cmd_id="$1"
+
+    # Ensure configuration directories/files exist when running in quick mode
+    init_config
     
     for cmd_data in "${COMMANDS[@]}"; do
         IFS='|' read -r id _ _ _ _ _ _ _ _ _ _ <<< "$cmd_data"
         if [ "$id" == "$cmd_id" ]; then
             clear_screen
-            execute_command "$cmd_data" "yes"
-            exit 0
+            if execute_command "$cmd_data" "yes"; then
+                exit 0
+            else
+                exit 1
+            fi
         fi
     done
     
@@ -2839,18 +2866,26 @@ main() {
                     echo "未找到匹配的命令"
                     exit 1
                 fi
-                if [ "$output_json" -eq 1 ] && command -v jq >/dev/null 2>&1; then
+                if [ "$output_json" -eq 1 ] && [ "${CMD_HELPER_DISABLE_JQ:-0}" != "1" ] && command -v jq >/dev/null 2>&1; then
                     # 输出 JSON
-                    printf '%s\n' "[" > /tmp/mcmd_search.json
-                    idx=0
-                    for cmd_data in "${matches[@]}"; do
-                        IFS='|' read -r id cat name command _ _ desc _ _ _ _ <<< "$cmd_data"
-                        printf '{"id":"%s","category":"%s","name":"%s","command":"%s","desc":"%s"}' "$id" "$cat" "$name" "$(printf '%s' "$command" | sed 's/"/\\"/g')" "$(printf '%s' "$desc" | sed 's/"/\\"/g')" >> /tmp/mcmd_search.json
-                        idx=$((idx+1))
-                        [ $idx -lt ${#matches[@]} ] && printf ',\n' >> /tmp/mcmd_search.json
-                    done
-                    printf ']\n' >> /tmp/mcmd_search.json
-                    cat /tmp/mcmd_search.json | jq '.'
+                    local json_output
+                    json_output="$({
+                        printf '['
+                        idx=0
+                        total=${#matches[@]}
+                        local esc_command esc_desc
+                        for cmd_data in "${matches[@]}"; do
+                            IFS='|' read -r id cat name command _ _ desc _ _ _ _ <<< "$cmd_data"
+                            esc_command=$(printf '%s' "$command" | sed 's/"/\\"/g')
+                            esc_desc=$(printf '%s' "$desc" | sed 's/"/\\"/g')
+                            printf '{"id":"%s","category":"%s","name":"%s","command":"%s","desc":"%s"}' \
+                                "$id" "$cat" "$name" "$esc_command" "$esc_desc"
+                            idx=$((idx+1))
+                            [ $idx -lt $total ] && printf ','
+                        done
+                        printf ']\n'
+                    })"
+                    printf '%s' "$json_output" | jq '.'
                 else
                     # 表格输出
                     for cmd_data in "${matches[@]}"; do
@@ -2900,9 +2935,9 @@ main() {
                 local sel="$2"; shift 2
                 local cmd_ids
                 if [[ "$sel" =~ ^[0-9]+$ ]]; then
-                    cmd_ids=$(jq -r ".预设组合[$((sel-1))].commands | join(\" \")" "$COMBOS_FILE" 2>/dev/null)
+                    cmd_ids=$(jq -r ".[\"预设组合\"][ $((sel-1)) ].commands | join(\" \")" "$COMBOS_FILE" 2>/dev/null)
                 else
-                    cmd_ids=$(jq -r ".预设组合[] | select(.name==\"$sel\") | .commands | join(\" \")" "$COMBOS_FILE" 2>/dev/null)
+                    cmd_ids=$(jq -r ".[\"预设组合\"][] | select(.name==\"$sel\") | .commands | join(\" \")" "$COMBOS_FILE" 2>/dev/null)
                 fi
                 if [ -z "$cmd_ids" ] || [ "$cmd_ids" = "null" ]; then
                     echo "未找到命令组合: $sel"; exit 1
